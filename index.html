@@ -81,6 +81,8 @@
   .btn.danger{color:var(--danger); border-color:var(--danger-soft); background:var(--danger-soft)}
   .btn.block{width:100%}
   .btn.sm{min-height:38px; padding:7px 12px; font-size:14px; border-radius:11px}
+  label.btn{display:flex; width:100%}
+  .btn input[type=file]{display:none}
   .row2{display:grid; grid-template-columns:1fr 1fr; gap:10px}
   .chips{display:flex; gap:8px; flex-wrap:wrap}
   .chip{
@@ -1064,11 +1066,9 @@ function openAddSheet() {
   openSheet(
     '<h2><span>添加照片</span><button class="close" data-act="closeSheet">✕</button></h2>' +
     '<div class="hint" style="margin:0 0 10px">目标日期：<b>' + esc(ymdCnFull(selDate)) + '</b>（每天最多 3 张）</div>' +
-    (camOK
-      ? '<button class="btn primary block" data-act="openCam">📷 用相机拍一张</button>'
-      : '<button class="btn ghost block" disabled style="opacity:.55">📷 用相机拍一张（当前环境不可用）</button>') +
-    '<button class="btn ' + (camOK ? 'ghost' : 'primary') + ' block" style="margin-top:10px" data-act="pickAlbum">🖼 从相册选择</button>' +
-    '<button class="btn ghost block" style="margin-top:10px" data-act="pickCamera">📸 调系统相机 App（备用方式）</button>' +
+    '<button class="btn primary block" data-act="openCam" style="' + (camOK ? '' : 'display:none') + '">📷 用相机拍一张（推荐）</button>' +
+    '<label for="fileAlbum" class="btn ' + (camOK ? 'ghost' : 'primary') + ' block" id="lblAlbum" style="margin-top:10px" data-act="armPick">🖼 从相册选择</label>' +
+    '<label for="fileCamera" class="btn ghost block" style="margin-top:10px" data-act="armPickCam">📸 调系统相机 App（备用）</label>' +
     (!camOK ? '<div class="hint" style="color:var(--danger)">网页相机不可用：' +
       (isSecureContextNow() ? '浏览器未提供 getUserMedia' : '当前不是 HTTPS 安全环境（iOS 规定：只有 https 或 localhost 才允许调用相机）。') +
       '<br>可以先用「从相册选择」上传已有的照片。</div>' : '') +
@@ -1592,7 +1592,19 @@ document.addEventListener('click', (ev) => {
       case 'clearCompare': photoSel = []; renderPhoto(); break;
       case 'openCompare': openCompare(); break;
       case 'pickAlbum': openAddSheet(); break;
-      case 'pickCamera': if (!dbReady) { toast('当前环境无法保存照片'); break; } $('#fileCamera').click(); break;
+      case 'pickCamera': if (!dbReady) { toast('当前环境无法保存照片'); break; } pickPending = true; $('#fileCamera').click(); break;
+      case 'armPick': pickPending = true; break;          /* label[for] 原生触发，无需 click() */
+      case 'armPickCam': pickPending = true; break;
+      case 'copyUrl': {
+        const url = (function () { try { return location.href; } catch (e) { return ''; } })();
+        const done = () => toast('网址已复制，去 Safari 粘贴打开');
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(url).then(done).catch(() => { prompt('复制这个网址：', url); });
+          } else prompt('复制这个网址：', url);
+        } catch (e) { prompt('复制这个网址：', url); }
+        break;
+      }
       case 'openCam': closeAllSheets(); openCamera(); break;
       case 'closeCam': stopCamera(); closeTopSheet(); break;
       case 'shootCam': shootCamera(); break;
@@ -1749,23 +1761,71 @@ $('#btnData').addEventListener('click', openDataSheet);
 
 /* 文件选择 */
 let diagPickArmed = false;
+let pickPending = false;          // 选择器已打开，正在等待文件返回
+let pickWatchTimer = null;
 async function onFilePicked(ev) {
   const files = ev.target.files;
-  try { ev.target.value = ''; } catch (e) { }
   if (!files || !files.length) {
     if (diagPickArmed) {
       diagPickArmed = false;
-      toast('选择器已打开但未返回文件（系统层面问题）');
-      openDiag('文件选择器没有返回任何文件：说明是系统/浏览器层面拦截，而不是应用压缩或存储失败。请改用 Chrome 打开，或重新添加主屏幕图标。');
+      pickPending = false;
+      openDiag('测试未通过：文件选择器已打开但一个文件都没返回（系统/浏览器层面拦截）。');
     }
     return;
   }
+  pickPending = false;
+  clearTimeout(pickWatchTimer);
+  let list = [];
+  try { list = Array.prototype.slice.call(files); } catch (e) { list = []; }
+  try { ev.target.value = ''; } catch (e) { }   // 清空要在取出文件列表之后
   if (diagPickArmed) {
     diagPickArmed = false;
-    toast('文件选择器正常，拿到 ' + files.length + ' 个文件，可以正常上传');
+    toast('文件选择器正常，拿到 ' + list.length + ' 个文件，可以正常上传');
     return;
   }
-  handlePhotoFiles(files);
+  handlePhotoFiles(list);
+}
+/* iOS 兜底：某些版本/独立窗口里 change 会晚于页面重新获得焦点才派发，这里补查几次 */
+function pendingPickWatch() {
+  if (!pickPending) return;
+  clearTimeout(pickWatchTimer);
+  let tries = 0;
+  const tick = () => {
+    tries++;
+    for (const inp of [$('#fileAlbum'), $('#fileCamera')]) {
+      if (inp && inp.files && inp.files.length) { onFilePicked({ target: inp }); return; }
+    }
+    if (tries < 10 && pickPending) pickWatchTimer = setTimeout(tick, 400);
+    else if (pickPending) { pickPending = false; openPickHelp(); }
+  };
+  pickWatchTimer = setTimeout(tick, 250);
+}
+window.addEventListener('focus', () => { setTimeout(pendingPickWatch, 120); });
+window.addEventListener('pageshow', () => { setTimeout(pendingPickWatch, 150); });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && camStream) stopCamera();
+  if (!document.hidden) setTimeout(pendingPickWatch, 150);
+});
+
+/* 选不到文件时给一份可操作的排查指引 */
+function openPickHelp() {
+  const isStandalone = (function () {
+    try { return !!(navigator.standalone || window.matchMedia('(display-mode: standalone)').matches); } catch (e) { return false; }
+  })();
+  openSheet(
+    '<h2><span>照片没能传进来</span><button class="close" data-act="closeSheet">✕</button></h2>' +
+    '<div class="hint" style="margin:0 0 10px">系统选择器打开了，但选完照片没有把文件交给页面。' +
+    (isStandalone ? '你当前是从<b>主屏幕图标</b>打开的独立窗口，这是 iOS 的已知限制场景。' : '') + '</div>' +
+    '<div class="li"><span>① 用网页相机拍照<br><span class="small muted">不走系统选择器，最不容易被拦</span></span>' +
+      '<button class="btn sm primary" data-act="openCam">试试</button></div>' +
+    '<div class="li"><span>② 改用 Safari 直接打开网址<br><span class="small muted">在 Safari 标签页里选照片通常正常，传完回主屏幕图标也能看到</span></span>' +
+      '<button class="btn sm ghost" data-act="copyUrl">复制网址</button></div>' +
+    '<div class="li"><span>③ 删掉主屏幕图标后重新添加<br><span class="small muted">只删图标不动数据，重新添加后先测一次选图</span></span></div>' +
+    '<div class="li"><span>④ 检查照片权限<br><span class="small muted">设置 → 隐私与安全性 → 照片，让浏览器有「所有照片」权限；并检查「屏幕使用时间 → 内容与隐私限制」</span></span></div>' +
+    '<div class="li"><span>⑤ 重启一次 iPhone<br><span class="small muted">iOS 的选择器服务偶尔卡住，重启即恢复</span></span></div>' +
+    '<div class="hint">iOS 上的 Chrome / Edge 底层仍是 WebKit，限制一样存在，换 Safari 成功率最高。</div>' +
+    '<button class="btn ghost block" style="margin-top:12px" data-act="diag">运行环境自检</button>'
+  );
 }
 $('#fileAlbum').addEventListener('change', ev => onFilePicked(ev));
 $('#fileCamera').addEventListener('change', ev => onFilePicked(ev));
